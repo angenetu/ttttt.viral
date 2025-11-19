@@ -1,0 +1,7 @@
+{
+  "name": "ViralForge AI",
+  "description": "Next-generation AI Video Creation & Growth Platform for creators.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}

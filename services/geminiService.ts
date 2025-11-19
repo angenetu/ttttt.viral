@@ -12,7 +12,6 @@ export const getAIClient = () => ai;
 
 export const generateScript = async (topic: string, platform: string, tone: string, language: string = 'English'): Promise<ScriptResult> => {
   if (!ai) {
-    // Fallback mock if no API key
     return new Promise((resolve) => {
       setTimeout(() => {
         resolve({
@@ -118,12 +117,11 @@ export const generateImage = async (prompt: string): Promise<string | null> => {
       console.error("Error generating image:", error);
       throw error;
     }
-  }
+}
 
 export const editImageWithAI = async (base64Image: string, prompt: string): Promise<string | null> => {
     if(!ai) return null;
     try {
-        // Clean base64 if it has header
         const data = base64Image.includes('base64,') ? base64Image.split('base64,')[1] : base64Image;
         
         const response = await ai.models.generateContent({
@@ -155,32 +153,161 @@ export const editImageWithAI = async (base64Image: string, prompt: string): Prom
     }
 }
 
-export const chatWithAI = async (message: string, useSearch: boolean = false) => {
+export const generateVideo = async (prompt: string, aspectRatio: '16:9' | '9:16' = '16:9'): Promise<string | null> => {
+    if (!ai) return null;
+    try {
+        let operation = await ai.models.generateVideos({
+            model: 'veo-3.1-fast-generate-preview',
+            prompt: prompt,
+            config: {
+                numberOfVideos: 1,
+                resolution: '720p',
+                aspectRatio: aspectRatio
+            }
+        });
+
+        // Poll for completion
+        while (!operation.done) {
+            await new Promise(resolve => setTimeout(resolve, 3000));
+            operation = await ai.operations.getVideosOperation({operation: operation});
+        }
+
+        const videoUri = operation.response?.generatedVideos?.[0]?.video?.uri;
+        if (videoUri) {
+             return `${videoUri}&key=${API_KEY}`;
+        }
+        return null;
+    } catch (e) {
+        console.error("Video generation error", e);
+        throw e;
+    }
+}
+
+export const generateSpeechAI = async (text: string, voiceName: string = 'Kore'): Promise<string | null> => {
+    if (!ai) return null;
+    try {
+        const response = await ai.models.generateContent({
+            model: "gemini-2.5-flash-preview-tts",
+            contents: { parts: [{ text }] },
+            config: {
+                responseModalities: [Modality.AUDIO],
+                speechConfig: {
+                    voiceConfig: {
+                        prebuiltVoiceConfig: { voiceName: voiceName } 
+                    }
+                }
+            }
+        });
+        const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+        // Return base64 PCM
+        return base64Audio || null;
+    } catch (e) {
+        console.error("TTS Error", e);
+        throw e;
+    }
+}
+
+export const transcribeAudio = async (audioBase64: string): Promise<string> => {
+    if (!ai) return "Simulated transcription: This audio content is analyzed by AI.";
+    try {
+        const data = audioBase64.includes('base64,') ? audioBase64.split('base64,')[1] : audioBase64;
+        const response = await ai.models.generateContent({
+            model: "gemini-2.5-flash",
+            contents: {
+                parts: [
+                    { inlineData: { data: data, mimeType: 'audio/mp3' } }, // Assume MP3 or compatible
+                    { text: "Transcribe this audio verbatim." }
+                ]
+            }
+        });
+        return response.text || "No transcription generated.";
+    } catch (e) {
+        console.error("Transcription Error", e);
+        return "Error transcribing audio.";
+    }
+}
+
+export interface ChatConfig {
+    useSearch?: boolean;
+    useMaps?: boolean;
+    useThinking?: boolean;
+    attachment?: { data: string; mimeType: string };
+}
+
+export const chatWithAI = async (message: string, config: ChatConfig = {}) => {
     if (!ai) return { text: "I'm just a mock AI without an API key.", sources: [] };
 
     try {
-        if (useSearch) {
-             const response = await ai.models.generateContent({
-                model: "gemini-2.5-flash",
-                contents: message,
-                config: {
-                    tools: [{googleSearch: {}}],
-                },
-             });
-             
-             const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks;
-             const sources = chunks?.map((c: any) => c.web?.uri).filter((u: string) => u) || [];
-             
-             return { text: response.text || "No response", sources };
-        } else {
-             const response = await ai.models.generateContent({
-                 model: 'gemini-3-pro-preview',
-                 contents: message
-             });
-             return { text: response.text || "No response", sources: [] };
+        let model = "gemini-2.5-flash";
+        let tools: any[] = [];
+        let contents: any = message;
+        let toolConfig: any = undefined;
+        let thinkingConfig: any = undefined;
+
+        // Thinking Mode overrides other models
+        if (config.useThinking) {
+            model = "gemini-3-pro-preview";
+            thinkingConfig = { thinkingBudget: 16000 }; // Use a reasonable budget
         }
+
+        // Search Grounding
+        if (config.useSearch && !config.useThinking) {
+             tools.push({ googleSearch: {} });
+        }
+
+        // Maps Grounding
+        if (config.useMaps && !config.useThinking) {
+            tools.push({ googleMaps: {} });
+        }
+
+        // Attachments (Video/Image)
+        if (config.attachment) {
+            // Video understanding usually requires Pro model
+            if (config.attachment.mimeType.startsWith('video/') || config.attachment.mimeType.startsWith('image/')) {
+                // If it's video, we prefer Gemini 3 Pro if not already selected
+                if (!config.useThinking) model = "gemini-3-pro-preview"; 
+            }
+            
+            const cleanData = config.attachment.data.includes('base64,') 
+                ? config.attachment.data.split('base64,')[1] 
+                : config.attachment.data;
+
+            contents = {
+                parts: [
+                    { inlineData: { data: cleanData, mimeType: config.attachment.mimeType } },
+                    { text: message }
+                ]
+            };
+        }
+
+        const finalConfig: any = {};
+        if (tools.length > 0) finalConfig.tools = tools;
+        if (toolConfig) finalConfig.toolConfig = toolConfig;
+        if (thinkingConfig) finalConfig.thinkingConfig = thinkingConfig;
+
+        const response = await ai.models.generateContent({
+            model: model,
+            contents: contents,
+            config: finalConfig
+        });
+
+        const text = response.text || "No response";
+        
+        // Extract sources from grounding
+        let sources: string[] = [];
+        const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks;
+        
+        if (chunks) {
+            chunks.forEach((c: any) => {
+                if (c.web?.uri) sources.push(c.web.uri);
+                if (c.maps?.uri) sources.push(c.maps.uri); // Maps URI
+            });
+        }
+
+        return { text, sources };
+
     } catch (e) {
-        console.error(e);
-        return { text: "Error communicating with AI.", sources: [] };
+        console.error("Chat Error", e);
+        return { text: "I encountered an error processing your request.", sources: [] };
     }
 }
